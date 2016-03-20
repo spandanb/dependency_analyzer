@@ -1,0 +1,10 @@
+This project statically determines the dependencies of the
+entities within a module and in packages and across packages.
+
+Usage:
+
+Clone repo
+cd into repo
+python analyze.py <path to starting module file> 
+
+Licensed under MIT License.
