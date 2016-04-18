@@ -12,6 +12,8 @@ from hashlist import hashlist
 import sys
 import pdb
 
+import importlib
+
 def get_module(filepath):
     """
     Returns a AST node object corresponding to argument file.
@@ -181,7 +183,12 @@ def handle_name(node, children, scopes):
 #Handle function parameters
 
 #4)
-#Handle from foo import *
+#When doing import foo as bar
+#you should store the name foo
+#if you intent to analyze dependencies
+#across modules
+#Need a generalized symbol table that stores both names.
+#i.e. a symbol table at the project level
 ###############################################################
 
 """
@@ -293,11 +300,16 @@ def create_symbol_table(root):
                 symbol_table[name_val] = (scopes[-1].lineno, scopes[-1].lineno_end)
 
         elif ntype == "ImportFrom":
+            #TODO: store node.module
             if node.names[0].name == '*':
-                #TODO: lookup members of this module
-                pass
+                try:
+                    imp = importlib.import_module(node.module)
+                except ImportError:
+                    print "Error: local system does not have {}. Skipping!".format(node.module)
+                    pass
             else:
                 for name in node.names:
+                    #TODO: store name.name even if name.asname defined    
                     name_val = name.asname or name.name
                     symbol_table[name_val] = (scopes[-1].lineno, scopes[-1].lineno_end)
 
