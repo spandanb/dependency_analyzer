@@ -179,6 +179,9 @@ def handle_name(node, children, scopes):
 
 #3)
 #Handle function parameters
+
+#4)
+#Handle from foo import *
 ###############################################################
 
 """
@@ -190,16 +193,32 @@ def set_depth(node, depth):
     """
     setattr(node[0], "depth", depth)
 
-def set_lineno_end(node, lineno_end):
-    """Set lineno end of an AST node
+def set_lineno(node, children):
     """
-    setattr(node[0], "lineno_end", lineno_end)
+    Sets lineno and lineno_end of all children of node.
+    Assigns lineno_end of ith child as the
+    the lineno of i+1 th child. 
+    Some AST nodes don't have a lineno property,
+    in which case sets it.
+    """
+    for i, child in enumerate(children):
+        child = child[0]
+        #if child does not have lineno, add it 
+        if not hasattr(child, "lineno"):
+            setattr(child, "lineno", node.lineno)
 
-def get_lineno(node):
-    """
-    Get's the lineno of the node
-    """
-    return node[0].lineno
+        if i == len(children) - 1:
+            #set child's lineno_end to node's lineno    
+            setattr(child, "lineno_end", node.lineno_end)
+        else:
+            sibling = children[i+1][0]
+            #if next sibling does not have lineno, add it
+            if not hasattr(sibling, "lineno"):
+                setattr(sibling, "lineno", node.lineno)
+
+            #set child's lineno_end to next sibling's lineno-1
+            #unless that would make it less than child's lineno
+            setattr(child, "lineno_end", max(child.lineno, sibling.lineno - 1))
 
 def set_globals(node, names):
     """
@@ -224,6 +243,9 @@ def create_symbol_table(root):
     """
     Creates a symbols table that maps each
     symbol to the scope within which it occurs.
+    The symbol table has to be created in its entirety 
+    first, since entities (e.g. functions, classes) can be 
+    referenced before being defined.
 
     Similar to find_dependencies in terms of traversing
     the AST.
@@ -296,24 +318,17 @@ def create_symbol_table(root):
         elif ntype == "Global":
             #add a list global vars on node on the top of  
             #the stack
-            #NOTE: nonlocal could be handled in similar way
+            #nonlocal could be handled in similar way
             set_globals(scopes[-1], node.names)
 
-        for i, child in enumerate(children):
+        #set lineno property of children nodes
+        set_lineno(node, children)
+
+        for child in children[::-1]:
             #set depth of child
             set_depth(child, node.depth + 1)
-            
-            #set lineno_end of child
-            #TODO: this only needs to be done for scoping_nodes
-            if i == len(children) - 1:
-                set_lineno_end(child, node.lineno_end)
-            else:
-                set_lineno_end(child, get_lineno(children[i+1]) - 1)
-
-        #Add children to stack
-        #Need to do this separately since children must be 
-        #added in reverse order 
-        stack.extend(children[::-1])
+            #Add children to stack
+            stack.append(child)
 
         #Add any new scopes
         #Need to do it here since scoping_nodes are defined in their parent scope
@@ -326,18 +341,8 @@ def create_symbol_table(root):
 
 def find_dependencies(root):
     """
-    Finds all dependencies in root object. 
-    Whereas check_dependency checks for dependencies to 
-    top level objects, this checks all dependencies.
-
-    Create a symbol-scope table. 
-    Note, python has local, nonlocal, and global scopes
-
-    TODO: This function is doing two tasks: 1) creating a symbols-scope
-    table and 2) finding dependencies based on this. 
-    However, the first has to be done in its entirety first
-    since entities (functions, classes) can be referenced before they are
-    defined. 
+    Finds all dependencies in root object based on symbol table. 
+    Consider a dependecy as containing a source and a destination.
 
     Cases (nodes) to account for:
         1) Assign 
@@ -362,8 +367,6 @@ def find_dependencies(root):
             or x().y().z(),
             or some combination thereof
 
-    Consider a dependecy as containing a source and a destination
-
     There are a lot of cases to be handled
 
     Arguments:
@@ -371,6 +374,7 @@ def find_dependencies(root):
             stored as (2-tuple) with (root node, array of children )
     """
     
+    symbol_table = create_symbol_table(root)
 
     names = []
     #Set the depth of the root node
@@ -412,7 +416,6 @@ def find_dependencies(root):
             #Don't add children
             continue
             
-
         #Add children to stack
         #This musn't always be performed
         for child in children[::-1]:
@@ -445,8 +448,8 @@ def analyze(module_path):
     #symbolic_pretty_print(nodes)
     pretty_print(nodes)
 
-    create_symbol_table(nodes[0])
-    #find_dependencies(nodes[0])
+    #create_symbol_table(nodes[0])
+    find_dependencies(nodes[0])
 
 
 if __name__ == '__main__':
