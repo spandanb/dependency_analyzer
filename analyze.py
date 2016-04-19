@@ -3,75 +3,17 @@ This module contains the functions and classes that analyze
 the code or directly help in the analysis.
 """
 import ast
-import pprint
 from sets import Set
 import json
 import os.path
 import consts
-from hashlist import hashlist
+from datastructures import STable, DTable
 import sys
 import pdb
 
 import importlib
 
-def get_module(filepath):
-    """
-    Returns a AST node object corresponding to argument file.
-    In addition sets `lineno` and `lineno_end` for starting and 
-    ending line number (inclusive).
-    
-    Arguments:- filepath
-        name of file to converted
-
-    Return: AST node object
-    """
-    with open(filepath, "r") as f:
-        lines = f.readlines()
-        src  = "".join(lines)
-    
-    node = ast.parse(src)
-    #Sets the start and end line numbers
-    node.lineno = 1
-    node.lineno_end = len(lines)
-
-    return node
-
-def pretty_print(self_map):
-    pprint.pprint(self_map)
-    #print json.dumps(self_map, sort_keys=True, indent=2)
-
-#Returns type of AST node
-node_type = lambda node: node.__class__.__name__
-
-def unique_id(node):
-    """
-    Returns progressively less informative identifiers
-    """
-    ntype = node_type(node)
-
-    identifier = ''
-
-    if ntype == 'Str':
-        identifier = node.s
-    elif ntype == 'Num':
-         identifier = node.n
-    elif ntype == 'Call' and hasattr(node.func, 'id'):
-         identifier = node.func.id
-    elif ntype == 'Attribute':
-        identifier = node.value.id
-    elif ntype == 'Import':
-        identifier = node.names[0].name
-    elif ntype == 'ImportFrom':
-        identifier = node.module
-    elif ntype == 'Module':
-        identifier = node.name
-    else:
-        identifier = getattr(node, "name", 
-                getattr(node, "id",
-                    id(node) 
-                )
-            )
-    return str(identifier)
+from utils import get_module, pretty_print, unique_id, node_type, scopes_to_str
 
 
 class NodeVisitor(ast.NodeVisitor):
@@ -158,17 +100,13 @@ def is_store(children):
     return children and node_type(children[0][0]) == "Store"
 
 
-def scopes_to_str(scopes):
+def stack_top(scopes):
     """
-    Converts a scopes' stack to string
+    Returns a 3-tuple representing the top of the stack
+    consists of (lineno, lineno_end, str of scopes)
     """
-    return '.'.join(map(unique_id, scopes))
-    
+    return (scopes[-1].lineno, scopes[-1].lineno_end, scopes_to_str(scopes))
 
-def handle_name(node, children, scopes):
-    #check for loads
-    if is_load(children):
-        print "{} => {}".format(scopes_to_str(scopes), unique_id(node))
 
 ###############################################################
 #####################      TODO     ###########################
@@ -275,8 +213,7 @@ def create_symbol_table(root):
     stack = [root]
 
     scopes = [] 
-
-    symbol_table = hashlist()
+    symbol_table = STable()
 
     while stack:
         node, children = stack.pop()
@@ -297,13 +234,19 @@ def create_symbol_table(root):
                 #name can be the name or an alias   
                 name_val = name.asname or name.name
                 #insert in symbol_table                
-                symbol_table[name_val] = (scopes[-1].lineno, scopes[-1].lineno_end)
+                symbol_table[name_val] = ()
 
         elif ntype == "ImportFrom":
             #TODO: store node.module
             if node.names[0].name == '*':
                 try:
-                    imp = importlib.import_module(node.module)
+                    imp_mod = importlib.import_module(node.module)
+                    #Add all names in imported module, except those
+                    #starting with '_'
+                    for name in dir(imp_mod):
+                        if name[0] != '_':
+                            symbol_table[name] = stack_top(scopes)
+
                 except ImportError:
                     print "Error: local system does not have {}. Skipping!".format(node.module)
                     pass
@@ -311,21 +254,21 @@ def create_symbol_table(root):
                 for name in node.names:
                     #TODO: store name.name even if name.asname defined    
                     name_val = name.asname or name.name
-                    symbol_table[name_val] = (scopes[-1].lineno, scopes[-1].lineno_end)
+                    symbol_table[name_val] = stack_top(scopes)
 
         elif ntype == "ClassDef" or ntype == "FunctionDef":   
-            symbol_table[node.name] = (scopes[-1].lineno, scopes[-1].lineno_end)
+            symbol_table[node.name] = stack_top(scopes) 
         
         #NOTE: if a name is being loaded then it already exists and doesn't need
         #to be added to symbol_table
         elif ntype == "Name" and not is_load(children) and not has_global(scopes[-1], node.id): 
-            symbol_table[node.id] = (scopes[-1].lineno, scopes[-1].lineno_end)
+            symbol_table[node.id] = stack_top(scopes)
 
         elif ntype == "arguments":
             if node.vararg: 
-                symbol_table[node.vararg] = (scopes[-1].lineno, scopes[-1].lineno_end)
+                symbol_table[node.vararg] = stack_top(scopes) 
             if node.kwarg:
-                symbol_table[node.kwarg] = (scopes[-1].lineno, scopes[-1].lineno_end)
+                symbol_table[node.kwarg] = stack_top(scopes) 
 
         elif ntype == "Global":
             #add a list global vars on node on the top of  
@@ -355,6 +298,8 @@ def find_dependencies(root):
     """
     Finds all dependencies in root object based on symbol table. 
     Consider a dependecy as containing a source and a destination.
+
+
 
     Cases (nodes) to account for:
         1) Assign 
@@ -399,6 +344,9 @@ def find_dependencies(root):
     #if the node.depth exceeds scope depth, pop the element
     scopes = [] 
 
+    #List of (src, dest) of dependencies
+    dependency_table = DTable(symbol_table=symbol_table)
+
     while len(stack):
         node, children = stack.pop()
         ntype = node_type(node) 
@@ -414,20 +362,28 @@ def find_dependencies(root):
         if ntype in scoping_nodes:
             scopes.append(node)
 
-        if ntype == "Name":
-            handle_name(node, children, scopes)
+        #Name is being loaded 
+        if ntype == "Name" and is_load(children):
+            """
+            """
+            dependency_table.append( (scopes, node))
         
         elif ntype == "Assign":
+            #TODO need to add assignments and then revoke them
+            #for child in children:
+            #print children
             pass
 
+            
         elif ntype == "Attribute":
             #TODO: attribute chains can be arbitrarily long
-            dep_dest = "{}.{}".format(node.value.id, node.attr)
-            print "{} => {}".format(scopes_to_str(scopes), dep_dest)
+            #dep_dest = "{}.{}".format(node.value.id, node.attr)
+            #print "{} => {}".format(scopes_to_str(scopes), dep_dest)
             
             #Don't add children
             continue
             
+        set_lineno(node, children)
         #Add children to stack
         #This musn't always be performed
         for child in children[::-1]:
@@ -435,7 +391,7 @@ def find_dependencies(root):
             stack.append(child)
 
 
-    #print names
+    print dependency_table 
 
 #TODO: Inner dependencies, i.e generalize check_dependency so as not to only check top level objs
 #TODO: Name store vs name load, i.e. scoping
