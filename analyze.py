@@ -106,6 +106,7 @@ def stack_top(scopes):
     consists of (lineno, lineno_end, str of scopes)
     """
     return (scopes[-1].lineno, scopes[-1].lineno_end, scopes_to_str(scopes))
+    #return (scopes[-1].lineno, scopes[-1].lineno_end, scopes[::])
 
 
 ###############################################################
@@ -143,8 +144,9 @@ def set_lineno(node, children):
     Sets lineno and lineno_end of all children of node.
     Assigns lineno_end of ith child as the
     the lineno of i+1 th child. 
-    Some AST nodes don't have a lineno property,
-    in which case sets it.
+    
+    Some AST nodes don't have a `lineno` property;
+    in these cases sets it based on the following algorithm.
     """
     for i, child in enumerate(children):
         child = child[0]
@@ -210,9 +212,19 @@ def create_symbol_table(root):
     """
 
     set_depth(root, 0)
+    #Initialize the stack, with the AST root
     stack = [root]
 
+    #scopes is a stack representing the geneology of scopes that apply to a given current context.
+    #e.g.
+    #def foo():
+    ##scope here, i.e. for x is [<module name>, foo]
+    #   x = 3
+    #scopes are defined as the triple (lineno, lineno_end, scope_string)
     scopes = [] 
+    #the symbol table maps the name to the scope.
+    #Any node can belong to multiple scopes, therefore this
+    #is a list of scope
     symbol_table = STable()
 
     while stack:
@@ -237,7 +249,6 @@ def create_symbol_table(root):
                 symbol_table[name_val] = ()
 
         elif ntype == "ImportFrom":
-            #TODO: store node.module
             if node.names[0].name == '*':
                 try:
                     imp_mod = importlib.import_module(node.module)
@@ -251,9 +262,11 @@ def create_symbol_table(root):
                     print "Error: local system does not have {}. Skipping!".format(node.module)
                     pass
             else:
+                #TODO: store node.module
                 for name in node.names:
                     #TODO: store name.name even if name.asname defined    
                     name_val = name.asname or name.name
+                    #name_val = "{}.{}".format(name.asname or name.name)
                     symbol_table[name_val] = stack_top(scopes)
 
         elif ntype == "ClassDef" or ntype == "FunctionDef":   
@@ -376,9 +389,15 @@ def find_dependencies(root):
 
             
         elif ntype == "Attribute":
+            pdb.set_trace()
             #TODO: attribute chains can be arbitrarily long
             #dep_dest = "{}.{}".format(node.value.id, node.attr)
             #print "{} => {}".format(scopes_to_str(scopes), dep_dest)
+
+            #TODO: Can't just do dependency_table.append( (scopes, node))
+            #since the unique_id function won't match the create the dep string like 
+            #{node.value.id}.{node.attr}.
+            #Either generalize unique_id or something else.
             
             #Don't add children
             continue
@@ -414,7 +433,7 @@ def analyze(module_path):
         nodes[0][0].name = name_from_path(module_path)
 
     #symbolic_pretty_print(nodes)
-    pretty_print(nodes)
+    #pretty_print(nodes)
 
     #create_symbol_table(nodes[0])
     find_dependencies(nodes[0])

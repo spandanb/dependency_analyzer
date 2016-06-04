@@ -7,7 +7,7 @@ class STable(dict):
     priority queue could be used to order the values, albeit
     with higher memory usage.
 
-    This is custom made to be used as a symbol table on
+    This is custom datastructure intended to be used as a symbol table on
     account of things like comparing only first 2 entries of 
     val
 
@@ -22,7 +22,7 @@ class STable(dict):
             #list of value
             super(STable, self).__setitem__(key, [value])
         else:
-
+            #val
             for i, val in enumerate(self[key]):
                 #The comparison is only based on the
                 #first 2 elements, i.e. lineno and lineno_end
@@ -48,6 +48,17 @@ class DTable(list):
         self.symbol_table = symbol_table
 
     def append(self, value):
+        """
+        Adds a value to the datastructure.
+
+        The value is a dependency pair, i.e. (src, dest). 
+        e.g. `y = x`, here value would be ('y', 'x'), since y is the 
+        src of the dependency (here src should be interpreted as the progenitor, 
+        since without y, x would just be and there would be no dependency.
+
+        We know `y`'s context, since this method is called from y`s context.
+        But what about x. Here, we use the symbol table to resolve `x`'s context. 
+        """
         #value is a 2-tuple of dependency src (scopes) and dest (node)
         src, dest = value
         
