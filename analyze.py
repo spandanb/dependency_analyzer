@@ -7,10 +7,10 @@ from sets import Set
 import json
 import os.path
 import consts
-from datastructures import STable, DTable
+from datastructures import STable, DTable, Stack
 import sys
 import pdb
-
+from collections import namedtuple
 import importlib
 
 from utils import get_module, pretty_print, unique_id, node_type, scopes_to_str
@@ -99,14 +99,6 @@ def is_load(children):
 def is_store(children):
     return children and node_type(children[0][0]) == "Store"
 
-
-def stack_top(scopes):
-    """
-    Returns a 3-tuple representing the top of the stack
-    consists of (lineno, lineno_end, str of scopes)
-    """
-    return (scopes[-1].lineno, scopes[-1].lineno_end, scopes_to_str(scopes))
-    #return (scopes[-1].lineno, scopes[-1].lineno_end, scopes[::])
 
 
 ###############################################################
@@ -213,32 +205,19 @@ def create_symbol_table(root):
 
     set_depth(root, 0)
     #Initialize the stack, with the AST root
-    stack = [root]
+    stack = Stack(root)
 
-    #scopes is a stack representing the geneology of scopes that apply to a given current context.
-    #e.g.
-    #def foo():
-    ##scope here, i.e. for x is [<module name>, foo]
-    #   x = 3
-    #scopes are defined as the triple (lineno, lineno_end, scope_string)
-    scopes = [] 
     #the symbol table maps the name to the scope.
     #Any node can belong to multiple scopes, therefore this
     #is a list of scope
     symbol_table = STable()
+    
+    #this represents objects imported from
+    #other modules
+    other_modules = {}
 
-    while stack:
-        node, children = stack.pop()
-        ntype = node_type(node) 
+    for node, children, ntype in stack:
 
-        #remove any stale scopes
-        while len(scopes):
-            #check `depth` of closest scope    
-            if node.depth <= scopes[-1].depth:
-                scopes.pop()
-            else:
-                break
-        
         if ntype == "Import":
             #Import object has names prop which
             #is an array of names
@@ -266,22 +245,21 @@ def create_symbol_table(root):
                 for name in node.names:
                     #TODO: store name.name even if name.asname defined    
                     name_val = name.asname or name.name
-                    #name_val = "{}.{}".format(name.asname or name.name)
-                    symbol_table[name_val] = stack_top(scopes)
+                    symbol_table[name_val] = stack.get_scopes(src_module=node.module)
 
         elif ntype == "ClassDef" or ntype == "FunctionDef":   
-            symbol_table[node.name] = stack_top(scopes) 
+            symbol_table[node.name] = stack.get_scopes()
         
         #NOTE: if a name is being loaded then it already exists and doesn't need
         #to be added to symbol_table
-        elif ntype == "Name" and not is_load(children) and not has_global(scopes[-1], node.id): 
-            symbol_table[node.id] = stack_top(scopes)
+        elif ntype == "Name" and not is_load(children) and not has_global(stack.scope_tail(), node.id): 
+            symbol_table[node.id] = stack.get_scopes()
 
         elif ntype == "arguments":
             if node.vararg: 
-                symbol_table[node.vararg] = stack_top(scopes) 
+                symbol_table[node.vararg] = stack.get_scopes()
             if node.kwarg:
-                symbol_table[node.kwarg] = stack_top(scopes) 
+                symbol_table[node.kwarg] = stack.get_scopes()
 
         elif ntype == "Global":
             #add a list global vars on node on the top of  
@@ -300,9 +278,9 @@ def create_symbol_table(root):
 
         #Add any new scopes
         #Need to do it here since scoping_nodes are defined in their parent scope
-        if ntype in scoping_nodes:
-            scopes.append(node)
+        stack.check_and_push_scope()
 
+    print "Symbol table is "
     print symbol_table
     return symbol_table
     
@@ -311,7 +289,6 @@ def find_dependencies(root):
     """
     Finds all dependencies in root object based on symbol table. 
     Consider a dependecy as containing a source and a destination.
-
 
 
     Cases (nodes) to account for:
@@ -350,36 +327,20 @@ def find_dependencies(root):
     #Set the depth of the root node
     set_depth(root, 0)
     #Stack of nodes to visit
-    stack = [root]
+    stack = Stack(root)
     
-    #stack of scopes with the highest scope being
-    #the smallest. Stored as a [ (scoping_node, scope_depth) ]
-    #if the node.depth exceeds scope depth, pop the element
-    scopes = [] 
-
     #List of (src, dest) of dependencies
     dependency_table = DTable(symbol_table=symbol_table)
 
-    while len(stack):
-        node, children = stack.pop()
-        ntype = node_type(node) 
-
-        #remove any stale scopes
-        while len(scopes):
-            #check `depth` of closest scope    
-            if node.depth <= scopes[-1].depth:
-                scopes.pop()
-            else:
-                break
+    for node, children, ntype in stack:
         
-        if ntype in scoping_nodes:
-            scopes.append(node)
+        stack.check_and_push_scope()
 
-        #Name is being loaded 
+        #A Name is being loaded, therefore 
         if ntype == "Name" and is_load(children):
             """
             """
-            dependency_table.append( (scopes, node))
+            dependency_table.append( (stack.scopes, node))
         
         elif ntype == "Assign":
             #TODO need to add assignments and then revoke them
@@ -389,7 +350,6 @@ def find_dependencies(root):
 
             
         elif ntype == "Attribute":
-            pdb.set_trace()
             #TODO: attribute chains can be arbitrarily long
             #dep_dest = "{}.{}".format(node.value.id, node.attr)
             #print "{} => {}".format(scopes_to_str(scopes), dep_dest)
@@ -409,7 +369,7 @@ def find_dependencies(root):
             set_depth(child, node.depth + 1)
             stack.append(child)
 
-
+    print "dependency table is "
     print dependency_table 
 
 #TODO: Inner dependencies, i.e generalize check_dependency so as not to only check top level objs

@@ -1,4 +1,5 @@
-from utils import unique_id, scopes_to_str
+from utils import unique_id, scopes_to_str, node_type
+from collections import namedtuple
 
 class STable(dict):
     """
@@ -67,12 +68,87 @@ class DTable(list):
         for i, scope in enumerate(self.symbol_table[unique_id(dest)]):
             #TODO: make sure the following makes sense    
             if dest.lineno >= scope[0] and dest.lineno <= scope[1]:
-                dest = "{}.{}".format(scope[2], unique_id(dest))
+                #check if type is a module import
+                if scope.src_module:
+                    dest = "{}.{}".format(scope.src_module, unique_id(dest))
+                else:
+                    dest = "{}.{}".format(scope.scopes, unique_id(dest))
                 src = scopes_to_str(src)
                 super(DTable, self).append((src, dest))
                 break
         
 
+Scopes = namedtuple('scopes', ['lineno', 'lineno_end', 'scopes', 'src_module' ])
+
+#These are the node types that create a scope
+#global and nonlocal vars need to tracked separately
+scoping_nodes = ["Module", "ClassDef", "FunctionDef"]
+
+class Stack(object):
+    """
+    A class for representing a stack as used in create_symbol_table
+    and find_dependencies.
+    """
+    def __init__(self, root):
+        #the stack itself
+        self.stack = [root]
+
+        #stack representing the geneology of scopes that apply to the
+        #current context with the highest scope being
+        #the smallest. Individual scopes are defined as the triple (lineno, lineno_end, scope_string).
+        #if the node.depth exceeds scope depth, pop the element
+        self.scopes = []
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        if not self.stack:
+            raise StopIteration
+        else:
+            self.node, self.children = self.stack.pop()
+            self.ntype = node_type(self.node)
+    
+            #remove any stale scopes
+            while self.scopes:
+                #check `depth` of closest scope    
+                if self.node.depth <= self.scopes[-1].depth:
+                    self.scopes.pop()
+                else:
+                    break
+            
+            return self.node, self.children, self.ntype
+
+    def append(self, child):
+        "Append a node onto the stack"
+        self.stack.append(child)
+
+    def get_scopes(self, src_module=None):
+        """
+        Returns a 4-tuple representing the top of the stack
+        consists of (lineno, lineno_end, str of scopes, src module)
+        src_module only applies when modules are imported and properties 
+        must be correctly resolved.
+        """
+        return Scopes(lineno     = self.scopes[-1].lineno, 
+                      lineno_end = self.scopes[-1].lineno_end, 
+                      scopes     = scopes_to_str(self.scopes),
+                      src_module = src_module)
+
+    def scope_tail(self):
+        """
+        Returns the tail of the scopes
+        """
+        return self.scopes[-1]
+
+    def check_and_push_scope(self):
+        """
+        pushes node on `scopes` stack if it is a
+        scoping node
+        """
+        if self.ntype in scoping_nodes:
+            self.scopes.append(self.node)
+         
 
 if __name__ == "__main__":
     pass
