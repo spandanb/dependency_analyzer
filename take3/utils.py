@@ -45,28 +45,28 @@ def unique_id(node):
     """
     ntype = node_type(node)
 
-    identifier = ''
-
     if ntype == 'Str':
         identifier = node.s
     elif ntype == 'Num':
          identifier = node.n
-    elif ntype == 'Call' and hasattr(node.func, 'id'):
+    #NOTE: Call doesn't always resolve properly
+    elif ntype == 'Call' and hasattr(node.func, 'id'): 
          identifier = node.func.id
     elif ntype == 'Attribute':
         identifier = node.value.id
-    elif ntype == 'Import':
-        identifier = node.names[0].name
     elif ntype == 'ImportFrom':
         identifier = node.module
     elif ntype == 'Module':
         identifier = node.name
+    elif hasattr(node, "name"):
+        identifier = node.name
+    elif hasattr(node, "id"):
+        identifier = node.id
+    elif isinstance(node, str):
+        identifier = node
     else:
-        identifier = getattr(node, "name", 
-                getattr(node, "id",
-                    id(node) 
-                )
-            )
+        #identifier = id(node)    
+        identifier = str(node)    
     return str(identifier)
 
 def nodes_to_str(nodes):

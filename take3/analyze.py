@@ -4,7 +4,7 @@ Rewrite of analyze.py
 import ast
 import pdb
 from utils import get_module, node_type, pretty_print, unique_id, nodes_to_str
-from collections import namedtuple
+from collections import namedtuple 
 import importlib
 
 ##################################################
@@ -197,10 +197,21 @@ def create_and_raise(exception_name, exception_msg):
 
 def concatenated(lst, element):
     """
-    concatenates `element` to `lst`
+    concatenates `element` to `lst` and 
+    returns lst
     """
     lst.append(element)
     return lst
+
+def precatenated(element, lst):
+    """
+    pre-catenates `element` to `lst` and 
+    returns lst
+    """
+    newlst = [element]
+    newlst.extend(lst)
+    return newlst
+    
 
 ##################################################
 ################ Utilities #######################
@@ -335,6 +346,30 @@ def get_children(node):
     """
     return list(ast.iter_child_nodes(node))
 
+def resolve_attr_chain(node):
+    """
+    node is an Attribute ast node. 
+    Return array representing
+    """
+    chain = [node.attr]
+    ptr = node.value
+    while True:
+        ntype = node_type(ptr)
+
+        if ntype == "Attribute":
+            chain.append(ptr.attr)
+            ptr = ptr.value
+        elif ntype == "Call":
+            ptr = ptr.func
+        elif ntype == "Name":
+            chain.append(ptr)
+            break
+        else:
+            break
+
+    return chain[::-1]
+
+
 ##################################################
 ################    Main   #######################
 ##################################################
@@ -402,7 +437,7 @@ def create_symbol_table(root):
             else:
                 for name in node.names:
                     identifier = name.asname or name.name
-                    set_src(name, name.name)
+                    set_src(name, node.module)
                     symtable[identifier] = scopemap(scope=scopestack.get_state(), astnode=name)
 
         elif ntype == "arguments":
@@ -453,8 +488,7 @@ def create_dependency_tree(root, symtable):
         #remove stale scoping nodes
         scopestack.predpop(lambda scopenode: scopenode.depth >= node.depth)
 
-
-        #TODO: should we also do the same stuff as create_symbol_table?
+        children = get_children(node) 
 
         if ntype == "Name": 
             #there is a dependency from scope -> name 
@@ -464,26 +498,34 @@ def create_dependency_tree(root, symtable):
                 current = scopestack.get_state()
                 candidates = symtable[unique_id(node)]
                 dependency = resolve_scope(current, candidates)
-                #The deptree only maps identifiers
-                
-                deptree.add_link(map(unique_id, current), map(unique_id, dst), unique_id(node))
+
+                srcmodule = get_src(dependency.astnode)
+                if srcmodule:
+                    dst = [srcmodule, node]
+                else:
+                    dst = concatenated(dependency.scope, node)
+
+                deptree.add_link(src=map(unique_id, current), dst=map(unique_id, dst))
 
         elif ntype == "Attribute":
             #get the current scope
             current = scopestack.get_state()  
+            #node.value may be nested, e.g. x....z, or x()....z() or some combination thereof 
+            attr_chain = resolve_attr_chain(node)
             #resolve the node based on the current scope
-            candidates = symtable[unique_id(node)]  
+            #only the head of the attr chain needs to be defined
+            candidates = symtable[unique_id(attr_chain[0])]  
             dependency = resolve_scope(current, candidates)
-            
+
             srcmodule = get_src(dependency.astnode)
             if srcmodule:
-                #if src module is not the same as the current module, then it should 
-                #be a separate path emananting from root
-                dst = [unique_id(node.value), node.attr]
+                #dependency originates from another module
+                dst = precatenated(srcmodule, attr_chain)
             else:
                 #dependency is intra-module
-                dst = concatenated(map(unique_id, concatenated(dependency.scope, node.value)), node.attr)
-            deptree.add_link(src = map(unique_id, current), dst = dst)
+                dst = dependency.scope + attr_chain
+
+            deptree.add_link(src = map(unique_id, current), dst = map(unique_id, dst))
             #don't need to add children since we resolved the whole subtree here    
             #e.g. pdb.set_trace, is an Attribute node with children value (Name= pdb) and attr (str = 'set_trace')
             #adding the child Name node could lead to redundant (incorrect) dependencies
@@ -491,7 +533,6 @@ def create_dependency_tree(root, symtable):
  
         #push nodes onto the stack; depth is already set from create_symbol_tree()
         #needs to be done here since not all children need to put on stack
-        children = get_children(node) 
         nodes.pushmany(reversed(children))
 
         if ntype in scoping_types: 
@@ -514,7 +555,7 @@ def analyze(filepath):
     #The alternative approach would be to have one pass, and resolve symbols as 
     #soon as they become available; however, existing solution is closer to how Python works
     symbol_table = create_symbol_table(root)
-    print_symtable(symbol_table)
+    #print_symtable(symbol_table)
 
     #find dependencies
     dependency_tree = create_dependency_tree(root, symbol_table)
