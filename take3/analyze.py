@@ -170,7 +170,12 @@ class DTree(object):
 
 
 
-scopemap = namedtuple('Scopemap', ['scope', 'astnode'])
+#scopemap = namedtuple('Scopemap', ['scope', 'astnode'])
+class scopemap(object):
+    def __init__(self, scope=None, astnode=None, alias=None):
+        self.scope = scope
+        self.astnode = astnode
+        self.alias = alias
         
 ##################################################
 ######### Utilities (General) ####################
@@ -208,10 +213,8 @@ def precatenated(element, lst):
     pre-catenates `element` to `lst` and 
     returns lst
     """
-    newlst = [element]
-    newlst.extend(lst)
-    return newlst
-    
+    lst.insert(0, element)
+    return lst 
 
 ##################################################
 ################ Utilities #######################
@@ -248,6 +251,22 @@ def get_src(node):
     """
     return hasattr(node, "srcmodule") and getattr(node, "srcmodule") or None
 
+def set_is_src(node):
+    """
+    sets True to is_src property, indicating
+    that this node represents the module itself, rather than a property.
+    This is to avoid dependencies like pdb.pdb
+    """
+    setattr(node, "is_src", True)
+
+def is_src(node):
+    """
+    Returns True if node has attr 'is_src', as is thereby 
+    implicitly set
+    """
+    return hasattr(node, "is_src") 
+    
+
 def is_load(children):
     """
     Called on the children nodes of "Name" node.
@@ -257,6 +276,49 @@ def is_load(children):
 
 def is_store(children):
     return children and node_type(children[0]) == "Store"
+
+def set_assignment(node, key, value):
+    """
+    Creates `assignment` dictionary property on `node` 
+    and adds the key-value pair.
+    wraps key in frozen set to hash it
+    Arguments:-
+        node: the ast node that represent the tail of the scopestack
+        key: the identifier being assigned, i.e. a list of nodes
+        value: the value being assigned to key
+    """
+    if not hasattr(node, "assignments"):
+        setattr(node, "assignments", {})
+    
+    node.assignments[frozenset(key)] = value 
+
+def get_assignment(node, key):
+    """
+    Returns the value associated with key or a Falsey value if key does not exist.
+    Arguments:- 
+        node: scoping tail node  
+        key: the key to search for, ie. list of ast nodes
+
+    NOTE: The current solution is somewhat inefficient.
+    The tail node of key is the identifier. Here we can't do a set comparison on the
+    whole list. Instead, we must compare the tail node based on the value.
+    This can be made more efficient by storing the tail node as its value in `set_assignment`
+    i.e.
+        val = node.assignments.get(frozenset(key))
+        if val: 
+            return list(val)
+    """
+    if hasattr(node, "assignments"):
+        key = frozenset(key)
+        for k, val in node.assignments.items():
+            diff = key.symmetric_difference(k)
+            if len(diff) == 2:
+                item1, item2 = diff
+                if unique_id(item1) == unique_id(item2): 
+                    return val
+            
+    return None 
+    
 
 def set_lineno(node, children):
     """
@@ -318,6 +380,8 @@ def resolve_scope(match, candidates):
     The algorithm is this:
         -prune any invalid candidates, i.e. candidate must be a subset of match 
         -if there are multiple left, then check lineno.
+        -else return sole candidate
+
     e.g. #here we would need lineno check to resolve foo
 
     def foo():
@@ -329,8 +393,17 @@ def resolve_scope(match, candidates):
     """
     resolved = []
     for candidate in candidates:
-        for i, node in enumerate(candidate.scope):
-            if node != match[i]:
+        #zip iterates over min-length
+        #FIXME: Can match be smaller than candidate.scope?
+        #Consider the following case:
+        """
+        import pdb
+        def foo():
+            x = pdb
+            x.set_trace()
+        """
+        for scpnode, mtchnode in zip(candidate.scope, match):
+            if scpnode != mtchnode:
                 break
         else:
             resolved.append(candidate)
@@ -348,8 +421,9 @@ def get_children(node):
 
 def resolve_attr_chain(node):
     """
-    node is an Attribute ast node. 
-    Return array representing
+    Returns array of identifiers of attributes of `node`.
+    Arguments:-
+        node: an Attribute ast node. 
     """
     chain = [node.attr]
     ptr = node.value
@@ -367,7 +441,77 @@ def resolve_attr_chain(node):
         else:
             break
 
+    #reverse chain, since resolution happens attribute first
     return chain[::-1]
+
+
+def process_name_node(node, scopestack, symtable):
+    """
+    Processes Name astnode and returns `src` and `dst` dependency pair
+    """
+    #there is a dependency from scope -> name 
+    #we know a symbol was loaded, but since identifiers are non-unique, 
+    #we must look up node in symtable and then resolve based on scopes
+    current = scopestack.get_state()
+    candidates = symtable[unique_id(node)]
+    
+    #first check scopetail for existing assignment
+    key = concatenated(scopestack.get_state(), node) 
+    assn = get_assignment(scopestack.get_tail(), key)
+    if assn: 
+        return current, assn
+
+    dependency = resolve_scope(current, candidates)
+
+    srcmodule = get_src(dependency.astnode)
+    if srcmodule and is_src(dependency.astnode):
+        #if node itself represents the module, then don't prepend module name    
+        dst = [node]
+    elif srcmodule:
+        dst = [srcmodule, node]
+    else:
+        dst = concatenated(dependency.scope, node)
+
+    return current, dst
+
+def process_attribute_node(node, scopestack, symtable):
+    """
+    Processes Attribute astnode and returns `src` and `dst` dependency pair
+    """
+    #get the current scope
+    current = scopestack.get_state()  
+    #node.value may be nested, e.g. x....z, or x()....z() or some combination thereof 
+    #therefore need to resolve it
+    attr_chain = resolve_attr_chain(node)
+
+    #assignments are stored as: scope + identifier
+    key = concatenated(scopestack.get_state(), attr_chain[0])
+    assn = get_assignment(scopestack.get_tail(), key)
+    if assn: 
+        candidates = symtable[assn]  
+    else:
+        #resolve the node based on the current scope
+        #only the head of the attr chain needs to be defined
+        candidates = symtable[unique_id(attr_chain[0])]  
+
+    dependency = resolve_scope(current, candidates)
+
+    if assn:
+        #need to resolve the alias    
+        attr_chain[0] = dependency.astnode
+    
+    srcmodule = get_src(dependency.astnode)
+    if srcmodule and is_src(dependency.astnode):
+        dst = attr_chain    
+    elif srcmodule: 
+        #dependency originates from another module
+        dst = precatenated(srcmodule, attr_chain)
+    else:
+        #dependency is intra-module
+        dst = dependency.scope + attr_chain
+
+    return current, dst 
+
 
 
 ##################################################
@@ -421,6 +565,7 @@ def create_symbol_table(root):
                 identifier = name.asname or name.name
                 #Set srcmodule property of ast node `name`
                 set_src(name, name.name)
+                set_is_src(name)
                 #symtable mapping should contain the node itself
                 symtable[identifier] = scopemap(scope=scopestack.get_state(), astnode=name)
         elif ntype == "ImportFrom":
@@ -470,7 +615,6 @@ def create_dependency_tree(root, symtable):
 
     Similar to create_symbol_table since scopes are some what
     like dependencies, minus the hierarchical scope info.
-
     """
     
     deptree = DTree() 
@@ -482,6 +626,9 @@ def create_dependency_tree(root, symtable):
     #stack of scopes
     scopestack = Stack()
 
+    #stack of assigned names
+    assignments = Stack()
+
     for node in nodes:
         ntype = node_type(node)
 
@@ -490,49 +637,58 @@ def create_dependency_tree(root, symtable):
 
         children = get_children(node) 
 
-        if ntype == "Name": 
-            #there is a dependency from scope -> name 
-            if is_load(children):
-                #we know a symbol was loaded, but since identifiers are non-unique, 
-                #we must look up node in symtable and then resolve based on scopes
-                current = scopestack.get_state()
-                candidates = symtable[unique_id(node)]
-                dependency = resolve_scope(current, candidates)
-
-                srcmodule = get_src(dependency.astnode)
-                if srcmodule:
-                    dst = [srcmodule, node]
-                else:
-                    dst = concatenated(dependency.scope, node)
-
-                deptree.add_link(src=map(unique_id, current), dst=map(unique_id, dst))
+        if ntype == "Name" and is_load(children):
+            src, dst = process_name_node(node, scopestack, symtable)
+            deptree.add_link(src=map(unique_id, src), dst=map(unique_id, dst))
 
         elif ntype == "Attribute":
-            #get the current scope
-            current = scopestack.get_state()  
-            #node.value may be nested, e.g. x....z, or x()....z() or some combination thereof 
-            attr_chain = resolve_attr_chain(node)
-            #resolve the node based on the current scope
-            #only the head of the attr chain needs to be defined
-            candidates = symtable[unique_id(attr_chain[0])]  
-            dependency = resolve_scope(current, candidates)
-
-            srcmodule = get_src(dependency.astnode)
-            if srcmodule:
-                #dependency originates from another module
-                dst = precatenated(srcmodule, attr_chain)
-            else:
-                #dependency is intra-module
-                dst = dependency.scope + attr_chain
-
-            deptree.add_link(src = map(unique_id, current), dst = map(unique_id, dst))
+            pdb.set_trace()
+            src, dst = process_attribute_node(node, scopestack, symtable)
+            deptree.add_link(src = map(unique_id, src), dst = map(unique_id, dst))
             #don't need to add children since we resolved the whole subtree here    
             #e.g. pdb.set_trace, is an Attribute node with children value (Name= pdb) and attr (str = 'set_trace')
             #adding the child Name node could lead to redundant (incorrect) dependencies
             continue            
- 
+
+        elif ntype == "Assign":
+            #Assigns consist of list of LHS values (targets), and a RHS types (value) 
+            
+            #resolve the value
+            val_type = node_type(node.value)
+            if val_type == "Name":
+                value = node.value.id
+            elif val_type == "Attribute":
+                value = resolve_attr_chain(node.value)
+            else: 
+                create_and_raise("UnknownRHSException", 
+                    "Unknown RHS, '{}' in Assign".format(val_type))
+
+            #resolve the target(s)
+            for target in node.targets:
+                target_type = node_type(target)
+                if target_type == "Name":
+                    #the process func return a (src, dst) depenendency pair, ignore src since that's just the current context
+                    _, dependency = process_name_node(target, scopestack, symtable)
+
+                elif target_type == "Attribute":
+                    _, dependency = process_attribute_node(target, scopestack, symtable)
+
+                else:
+                    create_and_raise("UnknownLHSException", 
+                        "Unknown LHS, '{}' in Assign".format(target_type))
+
+                #attach the value mapping to scopestack.get_tail() (scopetail)
+                #these will be automatically evicted when scopetail goes out of scope
+                #TODO: handles globals
+
+                set_assignment(scopestack.get_tail(), dependency, value)
+
+            continue
+
+
         #push nodes onto the stack; depth is already set from create_symbol_tree()
-        #needs to be done here since not all children need to put on stack
+        #needs to be done here (i.e. after specific ast type logic) since not all 
+        #children need to put on stack
         nodes.pushmany(reversed(children))
 
         if ntype in scoping_types: 
@@ -555,7 +711,7 @@ def analyze(filepath):
     #The alternative approach would be to have one pass, and resolve symbols as 
     #soon as they become available; however, existing solution is closer to how Python works
     symbol_table = create_symbol_table(root)
-    #print_symtable(symbol_table)
+    print_symtable(symbol_table)
 
     #find dependencies
     dependency_tree = create_dependency_tree(root, symbol_table)
@@ -598,6 +754,15 @@ hopefully that isn't a big concern if most code bases
     -to resolve the above issue __hash__, __eq__ of Vertex should consider lineno
 
 5) Nodes (vertices) should have ptrs to parents?
+
+6) Handle assignments to global vars
+
+7) when resolving assignments, remember assignments themselves can be propagated, e.g.
+x=pdb
+y=x
+y.set_trace()
+
+Here, first need to resolve y, then resolve x
 """
 
 
